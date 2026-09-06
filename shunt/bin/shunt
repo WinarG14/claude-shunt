@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""shunt - control the Claude Code big-file read shunt.
+
+usage: shunt on | off | status | log [N] | test
+"""
+import datetime
+import json
+import os
+import subprocess
+import sys
+
+# realpath, not abspath: this script is normally invoked through the
+# ~/.local/bin/shunt symlink and must still resolve to ~/.claude/shunt.
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+CONFIG = os.path.join(ROOT, "config.json")
+EVLOG = os.path.expanduser(os.environ.get("SHUNT_LOG_PATH") or os.path.join(ROOT, "log", "shunt.log"))
+TESTS = os.path.join(ROOT, "tests", "run_tests.sh")
+SETTINGS = os.path.expanduser("~/.claude/settings.json")
+
+
+def load_config():
+    with open(CONFIG) as fh:
+        return json.load(fh)
+
+
+def save_config(cfg):
+    with open(CONFIG, "w") as fh:
+        json.dump(cfg, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+
+
+def set_enabled(state):
+    cfg = load_config()
+    cfg["enabled"] = state
+    save_config(cfg)
+    print("shunt: enabled=%s (config %s)" % (state, CONFIG))
+    mode = os.environ.get("SHUNT_MODE")
+    if mode:
+        print("note: SHUNT_MODE=%s is set in this shell and overrides the config." % mode)
+
+
+def hooks_wired():
+    try:
+        with open(SETTINGS) as fh:
+            s = json.load(fh)
+    except Exception as exc:
+        return {"read": False, "bash": False, "error": repr(exc)}
+    out = {"read": False, "bash": False, "error": None}
+    for entry in (s.get("hooks", {}) or {}).get("PreToolUse", []) or []:
+        m = entry.get("matcher", "")
+        cmds = " ".join(h.get("command", "") for h in entry.get("hooks", []) or [])
+        if "check_read.py" in cmds and "Read" in m:
+            out["read"] = True
+        if "check_bash.py" in cmds and "Bash" in m:
+            out["bash"] = True
+    return out
+
+
+def read_events():
+    if not os.path.exists(EVLOG):
+        return []
+    rows = []
+    with open(EVLOG) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                pass
+    return rows
+
+
+def cmd_status():
+    cfg = load_config()
+    w = hooks_wired()
+    today = datetime.date.today().isoformat()
+    n_today = sum(1 for r in read_events() if str(r.get("ts", "")).startswith(today))
+    print("enabled            : %s" % cfg.get("enabled"))
+    print("min_lines          : %s" % cfg.get("min_lines"))
+    print("max_targeted_lines : %s" % cfg.get("max_targeted_lines"))
+    print("slice_budget       : %s" % cfg.get("slice_budget_enabled", True))
+    print("worker             : %s" % cfg.get("worker"))
+    print("SHUNT_MODE env     : %s" % (os.environ.get("SHUNT_MODE") or "(unset)"))
+    if w.get("error"):
+        print("settings.json      : UNREADABLE %s" % w["error"])
+    else:
+        print("hook Read wired    : %s" % w["read"])
+        print("hook Bash wired    : %s" % w["bash"])
+    print("events today       : %d (%s)" % (n_today, today))
+
+
+def cmd_log(n):
+    rows = read_events()[-n:]
+    if not rows:
+        print("(no events in %s)" % EVLOG)
+        return
+    fmt = "%-19s  %-11s  %-28s  %6s  %11s  %9s"
+    print(fmt % ("ts", "event", "file", "lines", "in/out", "cost"))
+    print("-" * 96)
+    for r in rows:
+        ts = str(r.get("ts", ""))[:19]
+        f = str(r.get("file", ""))
+        base = "; ".join(os.path.basename(p) for p in f.split(";") if p)[:28] or "-"
+        io = "%s/%s" % (r.get("in", "-"), r.get("out", "-"))
+        cost = r.get("cost_usd")
+        cost = ("$%.4f" % cost) if isinstance(cost, (int, float)) else "-"
+        print(fmt % (ts, r.get("event", ""), base, r.get("lines", "-"), io, cost))
+
+
+def main(argv):
+    if not argv:
+        print(__doc__.strip())
+        return 1
+    cmd = argv[0]
+    if cmd == "on":
+        set_enabled(True)
+    elif cmd == "off":
+        set_enabled(False)
+    elif cmd == "status":
+        cmd_status()
+    elif cmd == "log":
+        n = int(argv[1]) if len(argv) > 1 else 20
+        cmd_log(n)
+    elif cmd == "test":
+        return subprocess.call(["bash", TESTS])
+    else:
+        print(__doc__.strip())
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

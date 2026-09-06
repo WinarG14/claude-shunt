@@ -1,0 +1,32 @@
+{
+  "enabled": true,
+  "min_lines": 350,
+  "max_targeted_lines": 350,
+  "slice_budget_enabled": true,
+  "worker": "haiku",
+  "worker_timeout_s": 60,
+  "exempt_basenames": [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "MEMORY.md",
+    "SKILL.md",
+    "README.md"
+  ],
+  "exempt_path_prefixes": [
+    "~/.claude/",
+    "~/.claudex/",
+    "~/.codex/",
+    "~/.ai-skills/"
+  ],
+  "exempt_extensions": [
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".csv",
+    ".tsv",
+    ".jsonl",
+    ".lock"
+  ],
+  "log_enabled": true
+}

@@ -1,0 +1,6 @@
+log/
+tests/fixtures/
+*.jsonl
+.DS_Store
+__pycache__/
+*.pyc
