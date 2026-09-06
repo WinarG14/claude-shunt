@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """shunt - control the Claude Code big-file read shunt.
 
-usage: shunt on | off | status | log [N] | test
+usage: shunt on | off | status | log [N] | test | version
 """
 import datetime
 import json
@@ -9,21 +9,48 @@ import os
 import subprocess
 import sys
 
+VERSION = "0.2.0"
+
 # realpath, not abspath: this script is normally invoked through the
-# ~/.local/bin/shunt symlink and must still resolve to ~/.claude/shunt.
+# ~/.local/bin/shunt symlink and must still resolve to the copy it belongs to.
+# The tests ship beside it; the config and the log live at the shunt home,
+# which every copy shares.
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-CONFIG = os.path.join(ROOT, "config.json")
-EVLOG = os.path.expanduser(os.environ.get("SHUNT_LOG_PATH") or os.path.join(ROOT, "log", "shunt.log"))
+HOME = os.path.expanduser((os.environ.get("SHUNT_HOME") or "").strip() or "~/.claude/shunt")
+CONFIG = os.path.join(HOME, "config.json")
+EVLOG = os.path.expanduser(
+    (os.environ.get("SHUNT_LOG_PATH") or "").strip() or os.path.join(HOME, "log", "shunt.log")
+)
 TESTS = os.path.join(ROOT, "tests", "run_tests.sh")
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 
+DEFAULT_CONFIG = {
+    "enabled": True,
+    "min_lines": 350,
+    "max_targeted_lines": 350,
+    "slice_budget_enabled": True,
+    "worker": "haiku",
+    "worker_timeout_s": 180,
+    "max_payload_bytes": 600000,
+    "exempt_basenames": ["CLAUDE.md", "AGENTS.md", "MEMORY.md", "SKILL.md", "README.md"],
+    "exempt_path_prefixes": ["~/.claude/", "~/.claudex/", "~/.codex/", "~/.ai-skills/"],
+    "exempt_extensions": [".json", ".yaml", ".yml", ".toml", ".csv", ".tsv", ".jsonl", ".lock"],
+    "log_enabled": True,
+}
+
 
 def load_config():
+    """Read the config at the shunt home, writing the defaults if none is there."""
+    if not os.path.exists(CONFIG):
+        os.makedirs(os.path.join(HOME, "log"), exist_ok=True)
+        save_config(dict(DEFAULT_CONFIG))
+        print("shunt: wrote default config to %s" % CONFIG)
     with open(CONFIG) as fh:
         return json.load(fh)
 
 
 def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
     with open(CONFIG, "w") as fh:
         json.dump(cfg, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
@@ -77,11 +104,16 @@ def cmd_status():
     w = hooks_wired()
     today = datetime.date.today().isoformat()
     n_today = sum(1 for r in read_events() if str(r.get("ts", "")).startswith(today))
+    print("version            : %s" % VERSION)
+    print("shunt home         : %s" % HOME)
+    print("scripts            : %s" % os.path.join(ROOT, "scripts"))
     print("enabled            : %s" % cfg.get("enabled"))
     print("min_lines          : %s" % cfg.get("min_lines"))
     print("max_targeted_lines : %s" % cfg.get("max_targeted_lines"))
     print("slice_budget       : %s" % cfg.get("slice_budget_enabled", True))
     print("worker             : %s" % cfg.get("worker"))
+    print("worker_timeout_s   : %s" % cfg.get("worker_timeout_s"))
+    print("max_payload_bytes  : %s" % cfg.get("max_payload_bytes"))
     print("SHUNT_MODE env     : %s" % (os.environ.get("SHUNT_MODE") or "(unset)"))
     if w.get("error"):
         print("settings.json      : UNREADABLE %s" % w["error"])
@@ -123,6 +155,8 @@ def main(argv):
     elif cmd == "log":
         n = int(argv[1]) if len(argv) > 1 else 20
         cmd_log(n)
+    elif cmd in ("version", "--version", "-v"):
+        print("shunt %s" % VERSION)
     elif cmd == "test":
         return subprocess.call(["bash", TESTS])
     else:

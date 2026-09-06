@@ -211,6 +211,47 @@ run_case "C01 config enabled=false, big read -> allow"   "$READ_HOOK" 0 "$(jread
 run_case "C02 config enabled=false, cat big -> allow"    "$BASH_HOOK" 0 "$(jbash "cat '$BIG'")" SHUNT_MODE= "SHUNT_CONFIG_PATH=$CFG_DISABLED"
 run_case "C03 SHUNT_MODE=on beats enabled=false -> BLOCK" "$READ_HOOK" 2 "$(jread "$BIG")" SHUNT_MODE=on "SHUNT_CONFIG_PATH=$CFG_DISABLED"
 
+echo "=== payload cap, shunt home, config bootstrap ==="
+CFG_TINY="$TMPFIX/config_tinypayload.json"
+python3 - "$SHUNT_CONFIG_PATH" "$CFG_TINY" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+cfg["max_payload_bytes"] = 10
+json.dump(cfg, open(sys.argv[2], "w"), indent=2)
+PY
+
+P_LOG="$TMPFIX/payload.log"
+: > "$P_LOG"
+P_OUT="$(SHUNT_CONFIG_PATH="$CFG_TINY" SHUNT_LOG_PATH="$P_LOG" bash "$BULK" "$BIG" "what is here" 2>&1 >/dev/null)"
+P_RC=$?
+[ "$P_RC" -eq 1 ] && [[ "$P_OUT" == *"exceeds max_payload_bytes (10)"* ]]
+check "P01 payload over cap -> exit 1 with message" $? "rc=$P_RC out=${P_OUT:0:96}"
+! grep -q '"event": "worker_call"' "$P_LOG"
+check "P02 payload over cap -> no model call" $? "log lines=$(wc -l < "$P_LOG" | tr -d ' ')"
+grep -q '"event": "worker_fail"' "$P_LOG" && grep -q 'max_payload_bytes' "$P_LOG"
+check "P03 payload over cap -> worker_fail with reason" $? "$(tr -d '\n' < "$P_LOG" | cut -c1-140)"
+
+NEWHOME="$TMPFIX/newhome"
+rm -rf "$NEWHOME"
+run_case "H01 missing config bootstraps defaults -> BLOCK" "$READ_HOOK" 2 "$(jread "$BIG" '' h01)" SHUNT_MODE= "SHUNT_CONFIG_PATH=" "SHUNT_HOME=$NEWHOME" "SHUNT_LOG_PATH=$TMPFIX/newhome.log"
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); sys.exit(0 if c.get("enabled") is True else 1)' "$NEWHOME/config.json"
+check "H02 default config written, enabled=true" $? "$NEWHOME/config.json"
+
+HOME2="$TMPFIX/home2"
+mkdir -p "$HOME2"
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["enabled"]=False; json.dump(c, open(sys.argv[2],"w"), indent=2)' "$SHUNT_CONFIG_PATH" "$HOME2/config.json"
+run_case "H03 SHUNT_HOME config honoured by read hook"  "$READ_HOOK" 0 "$(jread "$BIG" '' h03)" SHUNT_MODE= "SHUNT_CONFIG_PATH=" "SHUNT_HOME=$HOME2"
+run_case "H04 SHUNT_HOME config honoured by bash hook"  "$BASH_HOOK" 0 "$(jbash "cat '$BIG'" /tmp h04)" SHUNT_MODE= "SHUNT_CONFIG_PATH=" "SHUNT_HOME=$HOME2"
+
+SHUNT_BIN="$ROOT/bin/shunt"
+env SHUNT_CONFIG_PATH= SHUNT_HOME="$HOME2" SHUNT_MODE= python3 "$SHUNT_BIN" status | grep -q "shunt home *: $HOME2"
+check "H05 bin/shunt status reports SHUNT_HOME" $? "$HOME2"
+env SHUNT_CONFIG_PATH= SHUNT_HOME="$HOME2" SHUNT_MODE= python3 "$SHUNT_BIN" on >/dev/null \
+  && python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); sys.exit(0 if c.get("enabled") is True else 1)' "$HOME2/config.json"
+check "H06 bin/shunt writes the SHUNT_HOME config" $? "$HOME2/config.json"
+env SHUNT_CONFIG_PATH= SHUNT_HOME="$HOME2" python3 "$SHUNT_BIN" version | grep -q "^shunt 0.2.0$"
+check "H07 bin/shunt version is 0.2.0" $? "shunt version"
+
 REAL_SUM_AFTER="$(shasum "$REAL_CONFIG" | awk '{print $1}')"
 [ "$REAL_SUM_BEFORE" = "$REAL_SUM_AFTER" ] \
   && python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$REAL_CONFIG"

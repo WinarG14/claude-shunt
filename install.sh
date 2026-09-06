@@ -29,7 +29,20 @@ fi
 cp -R "$SRC/shunt/." "$DEST/"
 
 if [ -n "$KEEP" ]; then
-  cp "$KEEP" "$DEST/config.json"
+  # keep the user's values, add any keys this version introduced
+  python3 - "$KEEP" "$SRC/shunt/config.json" "$DEST/config.json" <<'PY'
+import json, sys
+kept = json.load(open(sys.argv[1]))
+shipped = json.load(open(sys.argv[2]))
+added = [k for k in shipped if k not in kept]
+for k in added:
+    kept[k] = shipped[k]
+with open(sys.argv[3], "w") as fh:
+    json.dump(kept, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+if added:
+    print("    added new config keys: %s" % ", ".join(added))
+PY
   rm -f "$KEEP"
 fi
 
@@ -103,6 +116,18 @@ if n_read != 1 or n_bash != 1:
 PY
 rc=$?
 [ "$rc" -eq 0 ] || exit "$rc"
+
+echo "==> installing the bulk-reader skill"
+SKILL_SRC="$SRC/shunt/skills/bulk-reader/SKILL.md"
+SKILL_DEST="$HOME/.claude/skills/bulk-reader/SKILL.md"
+if [ -f "$SKILL_SRC" ]; then
+  mkdir -p "$(dirname "$SKILL_DEST")"
+  # only ever writes this one file; anything else in ~/.claude/skills is left alone
+  cp "$SKILL_SRC" "$SKILL_DEST"
+  echo "    $SKILL_DEST"
+else
+  echo "    skipped: no skills/bulk-reader/SKILL.md in the source tree"
+fi
 
 echo "==> symlinking $BINDIR/shunt"
 ln -sfn "$DEST/bin/shunt" "$BINDIR/shunt"

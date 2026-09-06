@@ -19,9 +19,10 @@ import shlex
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-DEFAULT_CONFIG = os.path.join(ROOT, "config.json")
-ERRLOG = os.path.join(ROOT, "log", "hook_errors.log")
+# The scripts ship beside the hooks, wherever this copy lives (a normal install
+# or a plugin cache directory), so resolve them from this file's own realpath.
+SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+BULK = os.path.join(SCRIPT_ROOT, "scripts", "bulk_read.sh")
 
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -35,17 +36,19 @@ WORKER_SCRIPT = "bulk_read.sh"
 MSG = (
     "[shunt] bash read blocked: {path} has {n} lines (limit {min_lines}); whole-file reads "
     "are shunted to a cheap reader to keep context small. This is the workspace's sanctioned "
-    'helper. Run: bash ~/.claude/shunt/scripts/bulk_read.sh "{path}" "<your question>"  '
+    'helper. Run: bash {bulk} "{path}" "<your question>"  '
     "→ returns line-cited bullets only. Treat bullets as leads: before you act on, "
     "edit, publish or cite any fact, do a targeted Read of the cited lines "
-    "(offset/limit ≤ {max_targeted}). Toggle: `shunt off` or SHUNT_MODE=off."
+    "(offset/limit ≤ {max_targeted}). Follow-up questions on the same file cost "
+    "nothing: run the helper again. Toggle: `shunt off` or SHUNT_MODE=off."
 )
 
 
 def log_error(msg):
     try:
-        os.makedirs(os.path.dirname(ERRLOG), exist_ok=True)
-        with open(ERRLOG, "a") as fh:
+        errlog = shunt_budget.errlog_path()
+        os.makedirs(os.path.dirname(errlog), exist_ok=True)
+        with open(errlog, "a") as fh:
             fh.write("%s %s\n" % (datetime.datetime.now().isoformat(timespec="seconds"), msg))
     except Exception:
         pass
@@ -53,30 +56,18 @@ def log_error(msg):
 
 def log_event(cfg, obj):
     try:
-        shunt_budget.append_event(cfg, ROOT, obj)
+        shunt_budget.append_event(cfg, obj)
     except Exception as exc:
         log_error("check_bash.py log_event: %r" % (exc,))
 
 
-def config_path():
-    """Config file path. SHUNT_CONFIG_PATH overrides it, so the tests never read or
-    write the installed config.json."""
-    override = (os.environ.get("SHUNT_CONFIG_PATH") or "").strip()
-    if override:
-        return os.path.expanduser(override)
-    return DEFAULT_CONFIG
-
-
 def load_config():
-    try:
-        with open(config_path()) as fh:
-            cfg = json.load(fh)
-        if not isinstance(cfg, dict):
-            raise ValueError("config root is not an object")
-        return cfg
-    except Exception as exc:
-        log_error("check_bash.py config unreadable, failing open: %r" % (exc,))
-        return None
+    """Config from SHUNT_HOME (default ~/.claude/shunt). A missing config is
+    created with the defaults; a malformed one returns None (fail open)."""
+    cfg, note = shunt_budget.load_config()
+    if note:
+        log_error("check_bash.py " + note)
+    return cfg
 
 
 def enabled(cfg):
@@ -229,11 +220,11 @@ def targeted(cfg, data, hits, count, min_lines):
         cwd = data.get("cwd") or ""
         for path, n in hits:
             real = shunt_budget.realpath(path)
-            prior, sanctioned = shunt_budget.budget_state(ROOT, session, real)
+            prior, sanctioned = shunt_budget.budget_state(session, real)
             if not sanctioned and prior + count > min_lines:
                 sys.stderr.write(
                     "[shunt] bash read blocked: "
-                    + shunt_budget.budget_message(prior, n, path) + "\n"
+                    + shunt_budget.budget_message(prior, n, path, BULK) + "\n"
                 )
                 log_event(cfg, {
                     "event": "block_slice_budget",
@@ -329,7 +320,8 @@ def main():
 
     path, n = hits[0]
     sys.stderr.write(
-        MSG.format(path=path, n=n, min_lines=min_lines, max_targeted=max_targeted) + "\n"
+        MSG.format(path=path, n=n, min_lines=min_lines, max_targeted=max_targeted,
+                   bulk=BULK) + "\n"
     )
     try:
         size = os.path.getsize(path)

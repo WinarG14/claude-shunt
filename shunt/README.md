@@ -1,8 +1,36 @@
-# shunt - big-file read router for Claude Code
+# shunt v0.2.0 - big-file read router for Claude Code
 
 Two PreToolUse hooks block whole-file reads of large text files and point Claude at a cheap
 worker model (Haiku) that returns line-cited bullets. Bullets are leads: anything Claude acts
 on, edits, publishes or cites must be confirmed with a targeted `offset`/`limit` Read.
+
+Three layers: the hooks enforce, `scripts/bulk_read.sh` does the cheap read, and
+`skills/bulk-reader/SKILL.md` tells the model the script exists.
+
+## Layout
+
+```
+.claude-plugin/plugin.json   plugin manifest, v0.2.0, points at skills/
+hooks/check_read.py          Read gate plus slice budget
+hooks/check_bash.py          Bash gate, budget metering, reader sanctioning
+hooks/shunt_budget.py        shunt home, config, event log, budget helpers
+hooks/hooks.json             PreToolUse wiring used when installed as a plugin
+scripts/bulk_read.sh         the cheap reader
+scripts/empty-mcp.json       no MCP servers for the reader
+skills/bulk-reader/SKILL.md  the skills layer
+workdir/CLAUDE.md            stub instructions for the reader sandbox
+bin/shunt                    on / off / status / log / test / version
+config.json                  defaults
+tests/run_tests.sh           70 offline tests
+```
+
+## Two locations
+
+The scripts are resolved from each hook's own real path, so a copy running from a plugin
+cache still names a `bulk_read.sh` that exists. The config and the event log live at the
+shunt home, `SHUNT_HOME`, default `~/.claude/shunt`, so one toggle and one slice budget
+cover every copy. A missing config file is created with the defaults (`enabled: true`);
+a malformed one fails open and is logged to `log/hook_errors.log`.
 
 - `hooks/check_read.py` - Read tool. Blocks when the file is over `min_lines` and no `limit`
   ≤ `max_targeted_lines` is given. Also enforces the slice budget (below).
@@ -13,6 +41,9 @@ on, edits, publishes or cites must be confirmed with a targeted `offset`/`limit`
 - `hooks/shunt_budget.py` - shared slice-budget helpers (log tail, per-session state).
 - `scripts/bulk_read.sh <file...> "<question>"` - the worker. Runs `claude -p` from
   `workdir/` with a cleaned env and no MCP servers, so it never loads a project's CLAUDE.md.
+  Prints `[shunt: ~<n> input tokens | delegated to <worker>]` to stderr before the call, and
+  refuses outright when the files add up to more than `max_payload_bytes` (default 600000),
+  which is logged as `worker_fail` with a reason and costs nothing.
 
 ## Slice budget
 
@@ -41,7 +72,8 @@ CLI lives at `bin/shunt`, symlinked to `~/.local/bin/shunt`.
 
 `enabled` · `min_lines` (block above this) · `max_targeted_lines` (largest allowed slice) ·
 `slice_budget_enabled` (per-session, per-file slice cap) · `worker` (`haiku`, or
-`claudex:<model>`) · `worker_timeout_s` · `exempt_basenames` · `exempt_path_prefixes`
+`claudex:<model>`) · `worker_timeout_s` (default 180) · `max_payload_bytes` (default 600000) ·
+`exempt_basenames` · `exempt_path_prefixes`
 (`~` expands) · `exempt_extensions` · `log_enabled`.
 Data files (.json/.yaml/.csv/…) and instruction files (CLAUDE.md, AGENTS.md, …) are exempt on
 purpose: a summariser cannot faithfully compress structured data, and instruction files must
@@ -50,24 +82,27 @@ be read whole. A missing or malformed config fails open (allow) and logs to `log
 ## Environment
 
 - `SHUNT_MODE=off|on` - beats `enabled` in the config.
+- `SHUNT_HOME` - where the config and the event log live. Default `~/.claude/shunt`.
 - `SHUNT_LOG_PATH` - event-log path override, honoured by both hooks, `bulk_read.sh` and
   `shunt log`. The test suite sets it so tests never touch the real log.
 - `SHUNT_CONFIG_PATH` - config-file path override, honoured by both hooks. The test suite
   sets it so tests never read or edit the installed `config.json`.
-- `SHUNT_WORKER`, `SHUNT_TIMEOUT` - override the worker model and its timeout for one call.
+- `SHUNT_WORKER`, `SHUNT_TIMEOUT`, `SHUNT_MAX_PAYLOAD_BYTES` - override the worker model, its
+  timeout and the payload cap for one call.
 
 ## Log format
 
 `log/shunt.log`, one JSON object per line: `ts, event (block_read|block_bash|
 block_slice_budget|targeted_read|worker_sanctioned|worker_call|worker_fail), session, cwd,
 file, files, lines, offset, limit, slices_read, file_tokens_est, returned_tokens_est, worker,
-in, out, cost_usd, wall_s` - only the fields that apply. `file_tokens_est` is bytes/4.
+in, out, cost_usd, wall_s, reason` - only the fields that apply. `file_tokens_est` is bytes/4.
 
 ## Uninstall
 
-Delete the two `PreToolUse` entries in `~/.claude/settings.json` (a pre-shunt copy is at
-`~/.claude/settings.json.bak-2026-09-06-shunt`), then `rm ~/.local/bin/shunt` and this folder.
-The repo's `uninstall.sh` does the same thing.
+Delete the two `PreToolUse` entries in `~/.claude/settings.json` (`install.sh` leaves a dated
+backup next to it), then `rm ~/.local/bin/shunt`, `~/.claude/skills/bulk-reader/` and this
+folder. The repo's `uninstall.sh --purge` does the same thing. Installed as a plugin instead,
+`claude plugin uninstall shunt@claude-shunt` removes the wiring.
 
 ## Known gaps
 

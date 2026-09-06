@@ -82,7 +82,7 @@ budget path: allow. The harness must never break a tool call.
 Whole-file block, on the file-read path. `{path}`, `{n}`, `{min_lines}`, `{max_targeted}`:
 
 ```
-[shunt] {path} has {n} lines (limit {min_lines}); whole-file reads are shunted to a cheap reader to keep context small. This is the workspace's sanctioned helper. Run: bash ~/.claude/shunt/scripts/bulk_read.sh "{path}" "<your question>"  → returns line-cited bullets only. Treat bullets as leads: before you act on, edit, publish or cite any fact, do a targeted Read of the cited lines (offset/limit ≤ {max_targeted}). Toggle: `shunt off` or SHUNT_MODE=off.
+[shunt] {path} has {n} lines (limit {min_lines}); whole-file reads are shunted to a cheap reader to keep context small. This is the workspace's sanctioned helper. Run: bash {bulk} "{path}" "<your question>"  → returns line-cited bullets only. Treat bullets as leads: before you act on, edit, publish or cite any fact, do a targeted Read of the cited lines (offset/limit ≤ {max_targeted}). Follow-up questions on the same file cost nothing: run the helper again. Toggle: `shunt off` or SHUNT_MODE=off.
 ```
 
 The shell version of that message is identical except that it starts
@@ -95,17 +95,27 @@ Budget block, on the file-read path. `{sum}` is what the session has already sli
 the file, `{n}` the file's line count:
 
 ```
-[shunt] You have already read {sum} of {n} lines of {path} in slices this session; further slices would rebuild the whole file in context. Run the reader first: bash ~/.claude/shunt/scripts/bulk_read.sh "{path}" "<your question>" — after that, targeted Reads of the cited lines are unlimited for this file. Toggle: `shunt off`.
+[shunt] You have already read {sum} of {n} lines of {path} in slices this session; further slices would rebuild the whole file in context. Run the reader first: bash {bulk} "{path}" "<your question>" — after that, targeted Reads of the cited lines are unlimited for this file. Follow-up questions on the same file cost nothing: run the helper again. Toggle: `shunt off`.
 ```
 
 The shell version is the same text prefixed `[shunt] bash read blocked: ` in place of
 `[shunt] `.
 
-When Codex serves the reader itself, replace the `bash ~/.claude/shunt/scripts/bulk_read.sh`
-command in these two messages with the equivalent Codex-side reader command, and keep
-everything else word for word.
+`{bulk}` is the absolute path of the reader script, resolved from the hook file's own real
+path (`../scripts/bulk_read.sh`), so a copy running from a plugin cache still names a script
+that exists. When Codex serves the reader itself, put the equivalent Codex-side reader command
+there instead, and keep everything else word for word.
 
 ## (b) Hook mechanism on the Codex side
+
+**Note before you start.** Spotify's own Codex plugin (`.codex-plugin/plugin.json` in
+https://github.com/spotify/portal-ai-plugins) ships skills only, no hooks: upstream, shunt is
+a Claude Code plugin. So the first job of this port is to confirm whether Codex CLI 0.144.x
+actually exposes a pre-tool hook. If it does, implement the enforcement below. If it does
+not, fall back to the skills layer (`shunt/skills/bulk-reader/SKILL.md`) plus a rule in
+`~/.codex/AGENTS.md`, which is soft enforcement: it asks the model to use the reader, it
+cannot stop it reading. Say so plainly in the README rather than implying the Codex side
+blocks anything.
 
 Codex CLI 0.144.x supports lifecycle hooks configured under `~/.codex`. A SessionStart hook is
 already in use on the author's machine, so the mechanism is known to work. Implement the
@@ -149,8 +159,14 @@ the user's local OpenAI-compatible proxy.
   Pass it as `Authorization: Bearer <token>`. Never write the token to a file, a log, a
   command line that gets logged, or an error message. If the Keychain item is missing, fail
   the reader call with a clear message and let the caller fall back to targeted reads.
-- Timeout: 60 seconds, hard. There is no `timeout` binary on the target machine, so wrap with
+- Timeout: `worker_timeout_s` from the config, default 180 seconds, hard. There is no `timeout` binary on the target machine, so wrap with
   `perl -e 'alarm shift; exec @ARGV' 60 ...` or an equivalent in-process deadline.
+- Payload cap: before calling the model, add up the bytes of the files. Above
+  `max_payload_bytes` (default 600000), print
+  `[shunt] payload <bytes> bytes exceeds max_payload_bytes (<cap>). Split the files or ask a
+  narrower question; use targeted Reads for the sections you need.`, log `worker_fail` with a
+  `reason`, and exit 1 without calling the model.
+- Before the call, print `[shunt: ~<chars/4> input tokens | delegated to <worker>]` to stderr.
 - The reader runs with no tools and no project instructions. On the Claude side this is done
   by running from a scratch working directory that contains a stub instruction file, with the
   Anthropic environment variables unset and an empty MCP config. Do the equivalent: a plain
@@ -209,8 +225,10 @@ fields or change the event names.
 
 ## (d) One switch for both apps
 
-The Codex hooks read the same config file as the Claude hooks:
-`~/.claude/shunt/config.json`. Do not create a second config under `~/.codex`. Honour the
+The Codex hooks read the same config file as the Claude hooks: `SHUNT_HOME/config.json`,
+where `SHUNT_HOME` defaults to `~/.claude/shunt`. Do not create a second config under
+`~/.codex`. A missing config file is not an error: create the home, write the defaults with
+`enabled: true`, and carry on. Only a malformed one fails open. Honour the
 same keys and the same precedence:
 
 1. `SHUNT_MODE=off` in the environment: disabled.
@@ -255,6 +273,11 @@ twice in one session, second blocks; a targeted read followed by an over-budget 
 blocks; a command that merely mentions the reader script does not sanction.
 
 Config precedence: `enabled` false allows on both gates, and `SHUNT_MODE=on` beats it.
+
+Payload cap, home and bootstrap: a reader call whose files exceed a tiny `max_payload_bytes`
+exits 1 with the cap message, logs `worker_fail`, and never calls the model; a `SHUNT_HOME`
+pointed at an empty temp directory is populated with a default config and the gate then
+blocks; a `SHUNT_HOME` holding a disabled config is honoured by both gates and by the CLI.
 
 The suite must never edit the installed config. Write one temp config (a copy of the real one,
 with an exempt path prefix added for the generated fixture directory so the exempt-prefix case

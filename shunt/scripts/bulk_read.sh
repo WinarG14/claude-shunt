@@ -4,13 +4,17 @@
 # prints line-cited bullets plus a one-line cost/latency footer.
 set -uo pipefail
 
+# Script assets (workdir, empty MCP config) sit beside this file, wherever this
+# copy lives. Config and log live at the shunt home, shared by every copy:
+# SHUNT_HOME, default ~/.claude/shunt.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(dirname "$SCRIPT_DIR")"
 EMPTY_MCP="$SCRIPT_DIR/empty-mcp.json"
-WORKDIR="$ROOT/workdir"
-CONFIG="$ROOT/config.json"
-EVLOG="${SHUNT_LOG_PATH:-$ROOT/log/shunt.log}"
-ERRLOG="$ROOT/log/hook_errors.log"
+WORKDIR="$(dirname "$SCRIPT_DIR")/workdir"
+HOME_DIR="${SHUNT_HOME:-$HOME/.claude/shunt}"
+HOME_DIR="${HOME_DIR/#\~/$HOME}"
+CONFIG="${SHUNT_CONFIG_PATH:-$HOME_DIR/config.json}"
+EVLOG="${SHUNT_LOG_PATH:-$HOME_DIR/log/shunt.log}"
+ERRLOG="$HOME_DIR/log/hook_errors.log"
 
 SYS_PROMPT="You are a precise document analyst. Answer the question ONLY from the provided files. Output structured bullets only; no greetings, no prose, no preamble. Every bullet starts with the file's line reference(s) in the form L<n> or L<a>-<b>, then the fact. Quote exact wording for names, values, dates and commands. If the answer is not explicitly stated in the files, output the single bullet: '- NOT IN FILE: <one line on what is closest and where>'. Never infer an order, structure or list that the text does not state."
 
@@ -19,7 +23,7 @@ if [ "$#" -lt 2 ]; then
   exit 1
 fi
 
-mkdir -p "$ROOT/log"
+mkdir -p "$HOME_DIR/log"
 
 # --- config (worker, timeout, logging); falls back to defaults -----------------
 eval "$(python3 - "$CONFIG" <<'PY' 2>/dev/null || true
@@ -29,12 +33,14 @@ try:
 except Exception:
     c = {}
 print("CFG_WORKER=%s" % shlex.quote(str(c.get("worker", "haiku"))))
-print("CFG_TIMEOUT=%s" % shlex.quote(str(int(c.get("worker_timeout_s", 60)))))
+print("CFG_TIMEOUT=%s" % shlex.quote(str(int(c.get("worker_timeout_s", 180)))))
+print("CFG_MAXBYTES=%s" % shlex.quote(str(int(c.get("max_payload_bytes", 600000)))))
 print("CFG_LOG=%s" % shlex.quote("1" if c.get("log_enabled", True) else "0"))
 PY
 )"
 WORKER="${SHUNT_WORKER:-${CFG_WORKER:-haiku}}"
-TIMEOUT_S="${SHUNT_TIMEOUT:-${CFG_TIMEOUT:-60}}"
+TIMEOUT_S="${SHUNT_TIMEOUT:-${CFG_TIMEOUT:-180}}"
+MAX_BYTES="${SHUNT_MAX_PAYLOAD_BYTES:-${CFG_MAXBYTES:-600000}}"
 LOG_ENABLED="${CFG_LOG:-1}"
 
 # --- args: last one is the question ------------------------------------------
@@ -49,6 +55,31 @@ for f in "${FILES[@]}"; do
     exit 1
   fi
 done
+
+log_worker_fail() { # log_worker_fail <reason> <wall_seconds>
+  [ "$LOG_ENABLED" = "1" ] || return 0
+  EVLOG="$EVLOG" WORKER="$WORKER" WALL="$2" REASON="$1" \
+  FILES_JOINED="$(printf '%s;' "${FILES[@]}")" python3 - <<'PYFAIL' 2>/dev/null || true
+import datetime, json, os
+rec = {"ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+       "event": "worker_fail", "session": "", "cwd": os.getcwd(),
+       "file": os.environ.get("FILES_JOINED", ""), "worker": os.environ["WORKER"],
+       "reason": os.environ["REASON"], "wall_s": float(os.environ["WALL"])}
+open(os.environ["EVLOG"], "a").write(json.dumps(rec, ensure_ascii=False) + "\n")
+PYFAIL
+}
+
+# --- payload cap: refuse before spending anything on the worker --------------
+FILE_BYTES=0
+for f in "${FILES[@]}"; do
+  sz=$(wc -c < "$f" | tr -d ' ')
+  FILE_BYTES=$((FILE_BYTES + sz))
+done
+if [ "$FILE_BYTES" -gt "$MAX_BYTES" ]; then
+  echo "[shunt] payload $FILE_BYTES bytes exceeds max_payload_bytes ($MAX_BYTES). Split the files or ask a narrower question; use targeted Reads for the sections you need." >&2
+  log_worker_fail "payload $FILE_BYTES bytes exceeds max_payload_bytes ($MAX_BYTES)" 0
+  exit 1
+fi
 
 PROMPT_FILE="$(mktemp -t shunt_prompt)"
 RAW_FILE="$(mktemp -t shunt_raw)"
@@ -69,11 +100,8 @@ with open(out_path, "w", encoding="utf-8") as out:
         out.write("</file>\n\n")
 PY
 
-FILE_BYTES=0
-for f in "${FILES[@]}"; do
-  sz=$(wc -c < "$f" | tr -d ' ')
-  FILE_BYTES=$((FILE_BYTES + sz))
-done
+PROMPT_CHARS=$(wc -c < "$PROMPT_FILE" | tr -d ' ')
+echo "[shunt: ~$((PROMPT_CHARS / 4)) input tokens | delegated to $WORKER]" >&2
 
 START="$(perl -MTime::HiRes=time -e 'printf "%.3f", time')"
 
@@ -108,17 +136,7 @@ if [ "$RC" -ne 0 ]; then
   REASON="rc=$RC"
   if [ "$RC" -eq 142 ] || [ "$RC" -eq 14 ]; then REASON="timeout after ${TIMEOUT_S}s"; fi
   echo "[shunt] worker failed rc=$RC ($REASON). Fall back to targeted Reads (offset/limit ≤ 350) of the sections you need." >&2
-  if [ "$LOG_ENABLED" = "1" ]; then
-    WORKER="$WORKER" WALL="$WALL" FILES_JOINED="$(printf '%s;' "${FILES[@]}")" \
-    python3 - "$EVLOG" fail 0 0 0 0 <<'PY'
-import json, os, sys, datetime
-rec = {"ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-       "event": "worker_fail", "session": "", "cwd": os.getcwd(),
-       "file": os.environ.get("FILES_JOINED", ""), "worker": os.environ["WORKER"],
-       "wall_s": float(os.environ["WALL"])}
-open(sys.argv[1], "a").write(json.dumps(rec, ensure_ascii=False) + "\n")
-PY
-  fi
+  log_worker_fail "$REASON" "$WALL"
   exit "$RC"
 fi
 

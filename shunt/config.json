@@ -4,7 +4,8 @@
   "max_targeted_lines": 350,
   "slice_budget_enabled": true,
   "worker": "haiku",
-  "worker_timeout_s": 60,
+  "worker_timeout_s": 180,
+  "max_payload_bytes": 600000,
   "exempt_basenames": [
     "CLAUDE.md",
     "AGENTS.md",

@@ -6,6 +6,7 @@ set -uo pipefail
 SETTINGS="$HOME/.claude/settings.json"
 DEST="$HOME/.claude/shunt"
 BINLINK="$HOME/.local/bin/shunt"
+SKILLDIR="$HOME/.claude/skills/bulk-reader"
 STAMP="$(date +%Y-%m-%d-%H%M%S)"
 PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1
@@ -56,9 +57,11 @@ rc=$?
 [ "$rc" -eq 0 ] || exit "$rc"
 
 if [ "$PURGE" -eq 1 ]; then
-  echo "==> purging $DEST and $BINLINK"
+  echo "==> purging $DEST, $BINLINK and $SKILLDIR"
   rm -f "$BINLINK"
   rm -rf "$DEST"
+  rm -f "$SKILLDIR/SKILL.md"
+  rmdir "$SKILLDIR" 2>/dev/null || true
 else
   echo "    left $DEST in place (use --purge to delete it)"
 fi

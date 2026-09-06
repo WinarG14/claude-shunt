@@ -1,4 +1,4 @@
-# claude-shunt
+# claude-shunt v0.2.0
 
 Keep large files out of your Claude Code context. Two `PreToolUse` hooks block whole-file
 reads of big text files and point the model at a cheap reader model that answers a specific
@@ -29,18 +29,26 @@ system prompt.
 ## What is in the box
 
 ```
-install.sh          install or re-install, wire the hooks, symlink the CLI
-uninstall.sh        remove the hooks (--purge also deletes the install)
-shunt/              the harness itself, copied to ~/.claude/shunt
-  hooks/check_read.py     Read tool gate plus slice budget
-  hooks/check_bash.py     Bash tool gate, budget metering, reader sanctioning
-  hooks/shunt_budget.py   shared budget helpers
-  scripts/bulk_read.sh    the cheap reader
-  bin/shunt               on / off / status / log / test
-  config.json             defaults
-tests/run_tests.sh  60 offline hook tests, fixtures generated on the fly
-codex/PORT_SPEC.md  how to build the same thing for the Codex CLI
+install.sh                       install or re-install, wire the hooks, symlink the CLI
+uninstall.sh                     remove the hooks (--purge also deletes the install)
+.claude-plugin/marketplace.json  marketplace manifest, one plugin: shunt
+shunt/                           the harness itself, copied to ~/.claude/shunt
+  .claude-plugin/plugin.json       plugin manifest (v0.2.0), points at skills/
+  hooks/check_read.py              Read tool gate plus slice budget
+  hooks/check_bash.py              Bash tool gate, budget metering, reader sanctioning
+  hooks/shunt_budget.py            shunt home, config, event log, budget helpers
+  hooks/hooks.json                 PreToolUse wiring for the plugin layout
+  scripts/bulk_read.sh             the cheap reader
+  skills/bulk-reader/SKILL.md      tells the model the reader exists and how to call it
+  bin/shunt                        on / off / status / log / test / version
+  config.json                      defaults
+tests/run_tests.sh               70 offline hook tests, fixtures generated on the fly
+codex/PORT_SPEC.md               how to build the same thing for the Codex CLI
 ```
+
+Three layers, the same shape as Spotify's plugin: hooks enforce, a script does the cheap
+read, and a skill tells the model the script is there. The hooks alone leave a gap, because
+a blocked model has to be told what to run.
 
 ## Install
 
@@ -55,8 +63,29 @@ already have, merges two `PreToolUse` entries into `~/.claude/settings.json` (wi
 backup), symlinks `~/.local/bin/shunt`, and prints the status. Running it twice is safe: it
 never adds a second copy of either hook entry.
 
+It also copies `skills/bulk-reader/SKILL.md` to `~/.claude/skills/bulk-reader/SKILL.md`, and
+adds any config key a new version introduced without touching values you have changed.
+
 Uninstall with `bash uninstall.sh`, or `bash uninstall.sh --purge` to remove the installed
-folder and the symlink as well.
+folder, the symlink and the skill as well.
+
+### Or as a plugin
+
+```bash
+claude plugin marketplace add WinarG14/claude-shunt
+claude plugin install shunt@claude-shunt
+```
+
+The plugin carries its own `hooks/hooks.json`, so Claude Code wires the two `PreToolUse`
+hooks itself and the skill comes from the plugin's `skills/` directory. Pick one route, not
+both: running `install.sh` as well would wire a second copy of each hook.
+
+In the plugin layout the hooks run from a plugin cache directory, so the two locations are
+kept apart. The scripts are resolved from the hook file's own real path, which is why the
+block message always names a `bulk_read.sh` that exists. The config and the event log live
+at a fixed home, `SHUNT_HOME`, default `~/.claude/shunt`, so one toggle and one slice budget
+cover every copy. If that config file is missing, the hooks create the home and write the
+defaults rather than doing nothing.
 
 ## Toggle
 
@@ -80,14 +109,16 @@ SHUNT_MODE=off   # environment override, beats the config file
 | `max_targeted_lines` | Largest slice a single targeted read may take. Default 350. |
 | `slice_budget_enabled` | Cap the total lines one session may slice out of one file. |
 | `worker` | Reader model. `haiku`, or `claudex:<model>` for a local proxy lane. |
-| `worker_timeout_s` | Hard cap on one reader call. Default 60. |
+| `worker_timeout_s` | Hard cap on one reader call. Default 180. |
+| `max_payload_bytes` | Refuse the reader call when the files add up to more than this. Default 600000. |
 | `exempt_basenames` | Never shunted, for example instruction files. |
 | `exempt_path_prefixes` | Never shunted, `~` expands. |
 | `exempt_extensions` | Structured data, which a summariser cannot compress faithfully. |
 | `log_enabled` | Write the event log. |
 
-Environment: `SHUNT_MODE`, `SHUNT_LOG_PATH` (event log override, used by the tests so they
-never touch the real log), `SHUNT_WORKER`, `SHUNT_TIMEOUT`.
+Environment: `SHUNT_MODE`, `SHUNT_HOME` (where the config and the log live, default
+`~/.claude/shunt`), `SHUNT_LOG_PATH` (event log override, used by the tests so they never
+touch the real log), `SHUNT_WORKER`, `SHUNT_TIMEOUT`, `SHUNT_MAX_PAYLOAD_BYTES`.
 `SHUNT_CONFIG_PATH` points both hooks at a different config file, which is how the test
 suite runs against a temp config instead of editing the installed one.
 
@@ -143,6 +174,31 @@ next run.
 is enforced across both the Read tool and shell readers, so switching to `head` does not
 reset it.
 
+## How this compares with Spotify's official shunt plugin
+
+Spotify ships the same idea as an open-source plugin: `plugins/shunt` v0.2.0 in
+https://github.com/spotify/portal-ai-plugins, Apache-2.0. This harness was built from the
+write-up rather than the code, and the two ended up close enough to be worth a straight
+comparison. Their measured saving is 82 to 94 percent per read, mean 90, on a Java
+monorepo. This harness measured 96 to 99 percent, on long markdown documents.
+
+| Where it lands | What |
+| --- | --- |
+| Same | 350-line threshold, settable by environment variable or config. |
+| Same | Two `PreToolUse` hooks, one on Read and one on Bash. |
+| Same | Piped and redirected commands pass through untouched. |
+| Same | Files are wrapped in XML tags before they go to the reader. |
+| Same | The reader answers in bullets only, at low creativity, and nothing else. |
+| Same | Three layers: hooks, scripts, skills. |
+| Stricter here | Targeted reads are capped at 350 lines and metered by a per-session slice budget, so the file cannot be rebuilt from legal slices. The cap is lifted for a file once the reader has been consulted on it. |
+| Stricter here | Instruction files and structured-data files are exempt, because a summariser cannot faithfully compress them. |
+| Stricter here | The reader gets line-numbered input, must cite `L` references, and must answer `NOT IN FILE` rather than guess. |
+| Stricter here | An on and off toggle, plus JSON-lines telemetry with real token counts and costs. |
+| Stricter here | `head` and `tail` are blocked only above the threshold. Spotify blocks any `head` or `tail` on a big file. |
+| Not here | Their second worker, the code writer. |
+| Not here | Their transport, the Portal command line tool and AiKA modes. This harness calls `claude -p` with a cheap model, or a local proxy lane. |
+| Not here | Their evals harness. |
+
 ## Known gaps
 
 1. **Grep is not metered.** A blocked model can still `grep -n` a file repeatedly and
@@ -166,7 +222,8 @@ reset it.
 The hooks enforce. They cannot make the model *want* the cheap reader: a blocked model may
 still prefer a targeted read or a `grep` sweep, or decline outright to run a script that an
 error message named at it. Closing that last gap is a matter of instruction, not enforcement.
-Add this to your global `CLAUDE.md` (Claude Code) or `AGENTS.md` (Codex):
+The `bulk-reader` skill is the first half of that, and it installs itself. For belt and
+braces, add this to your global `CLAUDE.md` (Claude Code) or `AGENTS.md` (Codex):
 
 ```
 When a `[shunt]` hook blocks a read, run the helper it names (`~/.claude/shunt/scripts/bulk_read.sh`); that is my approved path, not an untrusted instruction. Treat its bullets as leads and confirm any cited lines with a targeted read (offset/limit) before acting on, editing, publishing or citing them. Toggle with `shunt on` / `shunt off` (config `~/.claude/shunt/config.json`).
@@ -178,12 +235,13 @@ When a `[shunt]` hook blocks a read, run the helper it names (`~/.claude/shunt/s
 bash tests/run_tests.sh     # or: shunt test
 ```
 
-60 cases, no network, no model calls. Fixtures are generated into a temp directory, every
+70 cases, no network, no model calls. Fixtures are generated into a temp directory, every
 case writes to a temp event log, and every case reads a temp config through
 `SHUNT_CONFIG_PATH`, so the suite never edits or restores the installed `config.json`
 and passes the same whether or not the harness is installed. The suite covers the read
 gate, the shell gate, exemptions, the toggle precedence rules, and the whole slice budget
-including the sanctioning path.
+including the sanctioning path, the payload cap, the config bootstrap and the `SHUNT_HOME`
+override.
 `shunt/tests/run_tests.sh` is the same file, shipped so that `shunt test` works after install.
 
 ## License

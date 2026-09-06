@@ -1,0 +1,31 @@
+{
+  "name": "claude-shunt",
+  "owner": {
+    "name": "Winarsita Sotyaji",
+    "url": "https://github.com/WinarG14/claude-shunt"
+  },
+  "metadata": {
+    "description": "One plugin: shunt, a big-file read router for Claude Code.",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "shunt",
+      "source": "./shunt",
+      "version": "0.2.0",
+      "description": "Keeps large files out of context. PreToolUse hooks block whole-file reads of big text files and redirect to a cheap reader model that answers one question in line-cited bullets, with a per-session slice budget so the file cannot be rebuilt from slices.",
+      "author": {
+        "name": "Winarsita Sotyaji"
+      },
+      "repository": "https://github.com/WinarG14/claude-shunt",
+      "license": "MIT",
+      "category": "developer-tools",
+      "keywords": [
+        "token-optimization",
+        "context-management",
+        "model-routing",
+        "delegation"
+      ]
+    }
+  ]
+}
