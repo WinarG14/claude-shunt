@@ -1,7 +1,9 @@
 #!/bin/bash
 # Unit tests for the shunt PreToolUse hooks. Prints PASS/FAIL per case.
 # Fixtures are generated here, so the suite has no machine-specific paths.
-# Every case writes to a temp event log (SHUNT_LOG_PATH), never the real one.
+# Every case writes to a temp event log (SHUNT_LOG_PATH), never the real one, and
+# reads a temp config (SHUNT_CONFIG_PATH), so the installed config.json is never
+# edited, mutated or restored.
 # Exit 1 if any case fails.
 set -uo pipefail
 
@@ -13,25 +15,45 @@ fi
 READ_HOOK="$ROOT/hooks/check_read.py"
 BASH_HOOK="$ROOT/hooks/check_bash.py"
 FIX="$ROOT/tests/fixtures"
+EXEMPT_DIR="$FIX/exempt_dir"
 TMPFIX="${TMPDIR:-/tmp}/shunt_tests"
 
-mkdir -p "$FIX" "$TMPFIX"
-python3 - "$TMPFIX" "$FIX" <<'PY'
+# The real config must be byte-identical at the end of the run.
+REAL_CONFIG="$ROOT/config.json"
+REAL_SUM_BEFORE="$(shasum "$REAL_CONFIG" | awk '{print $1}')"
+
+mkdir -p "$EXEMPT_DIR" "$TMPFIX"
+python3 - "$TMPFIX" "$EXEMPT_DIR" "$REAL_CONFIG" <<'PY'
 import os, sys, json
-tmp, fix = sys.argv[1], sys.argv[2]
+tmp, exempt, real_config = sys.argv[1], sys.argv[2], sys.argv[3]
 def big(path, n, text="line %d filler content for the shunt hook tests"):
     with open(path, "w") as fh:
         for i in range(1, n + 1):
             fh.write((text % i) + "\n")
 big(os.path.join(tmp, "big_doc.md"), 900)      # the "large file" under test
 big(os.path.join(tmp, "CLAUDE.md"), 400)       # exempt basename
-big(os.path.join(fix, "big_under_claude.md"), 420)  # exempt path prefix (~/.claude)
+big(os.path.join(exempt, "big_under_claude.md"), 420)  # exempt path prefix
 with open(os.path.join(tmp, "small.md"), "w") as fh:
     fh.write("tiny\nfile\n")
 with open(os.path.join(tmp, "big.json"), "w") as fh:
     json.dump({"rows": [{"i": i, "v": "x" * 20} for i in range(500)]}, fh, indent=1)
 with open(os.path.join(tmp, "big.bin"), "wb") as fh:
     fh.write(b"\x00\x01\x02" * 100 + b"\n" * 500)
+
+# One temp config for the whole suite: the shipped config plus an exempt prefix
+# pointing at the generated fixture directory, so the "exempt path prefix" case
+# does not depend on the harness being installed under ~/.claude.
+cfg = json.load(open(real_config))
+cfg["exempt_path_prefixes"] = list(cfg.get("exempt_path_prefixes") or []) + [
+    exempt.rstrip("/") + "/"
+]
+json.dump(cfg, open(os.path.join(tmp, "config.json"), "w"), indent=2)
+
+# Two variants, so no case ever has to edit and restore the real config.
+disabled = dict(cfg); disabled["enabled"] = False
+json.dump(disabled, open(os.path.join(tmp, "config_disabled.json"), "w"), indent=2)
+nobudget = dict(cfg); nobudget["slice_budget_enabled"] = False
+json.dump(nobudget, open(os.path.join(tmp, "config_nobudget.json"), "w"), indent=2)
 PY
 
 BIG="$TMPFIX/big_doc.md"
@@ -40,8 +62,13 @@ SMALL="$TMPFIX/small.md"
 BIGCLAUDE="$TMPFIX/CLAUDE.md"
 BIGJSON="$TMPFIX/big.json"
 BIGBIN="$TMPFIX/big.bin"
-UNDERCLAUDE="$FIX/big_under_claude.md"
+UNDERCLAUDE="$EXEMPT_DIR/big_under_claude.md"
 BULK="$ROOT/scripts/bulk_read.sh"
+
+# All cases read this config, never $ROOT/config.json.
+export SHUNT_CONFIG_PATH="$TMPFIX/config.json"
+CFG_DISABLED="$TMPFIX/config_disabled.json"
+CFG_NOBUDGET="$TMPFIX/config_nobudget.json"
 
 # All cases log here, never to $ROOT/log/shunt.log.
 export SHUNT_LOG_PATH="$TMPFIX/unit_shunt.log"
@@ -95,7 +122,7 @@ run_case "R03 big file, limit 400 -> BLOCK"              "$READ_HOOK" 2 "$(jread
 run_case "R04 big file, offset only (no limit) -> BLOCK" "$READ_HOOK" 2 "$(jread "$BIG" '{"offset":200}')" SHUNT_MODE=
 run_case "R05 small file -> allow"                       "$READ_HOOK" 0 "$(jread "$SMALL")" SHUNT_MODE=
 run_case "R06 big CLAUDE.md (exempt basename) -> allow"  "$READ_HOOK" 0 "$(jread "$BIGCLAUDE")" SHUNT_MODE=
-run_case "R07 big file under ~/.claude -> allow"         "$READ_HOOK" 0 "$(jread "$UNDERCLAUDE")" SHUNT_MODE=
+run_case "R07 big file under exempt prefix -> allow"     "$READ_HOOK" 0 "$(jread "$UNDERCLAUDE")" SHUNT_MODE=
 run_case "R08 big .json (exempt extension) -> allow"     "$READ_HOOK" 0 "$(jread "$BIGJSON")" SHUNT_MODE=
 run_case "R09 missing path -> allow"                     "$READ_HOOK" 0 "$(jread "$TMPFIX/no_such_shunt_file.md")" SHUNT_MODE=
 run_case "R10 binary file -> allow"                      "$READ_HOOK" 0 "$(jread "$BIGBIN")" SHUNT_MODE=
@@ -147,13 +174,9 @@ run_case "T03c session B second slice -> BLOCK"          "$READ_HOOK" 2 "$(jread
 run_case "T03d session C first slice -> allow"           "$READ_HOOK" 0 "$(jread "$BIG" '{"offset":351,"limit":350}' t03C)" SHUNT_MODE= "SHUNT_LOG_PATH=$T_LOG"
 
 : > "$T_LOG"
-cp "$ROOT/config.json" "$TMPFIX/config.bak"
-python3 -c 'import json,sys
-p=sys.argv[1]; c=json.load(open(p)); c["slice_budget_enabled"]=False; json.dump(c,open(p,"w"),indent=2)' "$ROOT/config.json"
-run_case "T04a budget disabled, slice 350 -> allow"      "$READ_HOOK" 0 "$(jread "$BIG" '{"offset":1,"limit":350}' t04)"   SHUNT_MODE= "SHUNT_LOG_PATH=$T_LOG"
-run_case "T04b budget disabled, slice 351 -> allow"      "$READ_HOOK" 0 "$(jread "$BIG" '{"offset":351,"limit":350}' t04)" SHUNT_MODE= "SHUNT_LOG_PATH=$T_LOG"
-run_case "T04c budget disabled, slice 701 -> allow"      "$READ_HOOK" 0 "$(jread "$BIG" '{"offset":701,"limit":350}' t04)" SHUNT_MODE= "SHUNT_LOG_PATH=$T_LOG"
-cp "$TMPFIX/config.bak" "$ROOT/config.json"
+run_case "T04a budget disabled, slice 350 -> allow"      "$READ_HOOK" 0 "$(jread "$BIG" '{"offset":1,"limit":350}' t04)"   SHUNT_MODE= "SHUNT_LOG_PATH=$T_LOG" "SHUNT_CONFIG_PATH=$CFG_NOBUDGET"
+run_case "T04b budget disabled, slice 351 -> allow"      "$READ_HOOK" 0 "$(jread "$BIG" '{"offset":351,"limit":350}' t04)" SHUNT_MODE= "SHUNT_LOG_PATH=$T_LOG" "SHUNT_CONFIG_PATH=$CFG_NOBUDGET"
+run_case "T04c budget disabled, slice 701 -> allow"      "$READ_HOOK" 0 "$(jread "$BIG" '{"offset":701,"limit":350}' t04)" SHUNT_MODE= "SHUNT_LOG_PATH=$T_LOG" "SHUNT_CONFIG_PATH=$CFG_NOBUDGET"
 
 : > "$T_LOG"
 run_case "T05a bulk_read.sh call -> allow"               "$BASH_HOOK" 0 "$(jbash "bash $BULK \"$BIG\" \"what is here\"" /tmp t05)" SHUNT_MODE= "SHUNT_LOG_PATH=$T_LOG"
@@ -184,16 +207,14 @@ run_case "T09c t09 slice 1/350 -> allow"                 "$READ_HOOK" 0 "$(jread
 run_case "T09d t09 slice 351/350 -> BLOCK"               "$READ_HOOK" 2 "$(jread "$BIG" '{"offset":351,"limit":350}' t09)" SHUNT_MODE= "SHUNT_LOG_PATH=$T_LOG"
 
 echo "=== config switch ==="
-cp "$ROOT/config.json" "$TMPFIX/config.bak"
-python3 -c 'import json,sys
-p=sys.argv[1]; c=json.load(open(p)); c["enabled"]=False; json.dump(c,open(p,"w"),indent=2)' "$ROOT/config.json"
-run_case "C01 config enabled=false, big read -> allow"   "$READ_HOOK" 0 "$(jread "$BIG")" SHUNT_MODE=
-run_case "C02 config enabled=false, cat big -> allow"    "$BASH_HOOK" 0 "$(jbash "cat '$BIG'")" SHUNT_MODE=
-run_case "C03 SHUNT_MODE=on beats enabled=false -> BLOCK" "$READ_HOOK" 2 "$(jread "$BIG")" SHUNT_MODE=on
-cp "$TMPFIX/config.bak" "$ROOT/config.json"
+run_case "C01 config enabled=false, big read -> allow"   "$READ_HOOK" 0 "$(jread "$BIG")" SHUNT_MODE= "SHUNT_CONFIG_PATH=$CFG_DISABLED"
+run_case "C02 config enabled=false, cat big -> allow"    "$BASH_HOOK" 0 "$(jbash "cat '$BIG'")" SHUNT_MODE= "SHUNT_CONFIG_PATH=$CFG_DISABLED"
+run_case "C03 SHUNT_MODE=on beats enabled=false -> BLOCK" "$READ_HOOK" 2 "$(jread "$BIG")" SHUNT_MODE=on "SHUNT_CONFIG_PATH=$CFG_DISABLED"
 
-python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$ROOT/config.json" \
-  && echo "config.json restored and valid" || echo "WARNING: config.json restore problem"
+REAL_SUM_AFTER="$(shasum "$REAL_CONFIG" | awk '{print $1}')"
+[ "$REAL_SUM_BEFORE" = "$REAL_SUM_AFTER" ] \
+  && python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$REAL_CONFIG"
+check "C04 real config.json untouched and valid" $? "$REAL_CONFIG"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

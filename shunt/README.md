@@ -52,6 +52,8 @@ be read whole. A missing or malformed config fails open (allow) and logs to `log
 - `SHUNT_MODE=off|on` - beats `enabled` in the config.
 - `SHUNT_LOG_PATH` - event-log path override, honoured by both hooks, `bulk_read.sh` and
   `shunt log`. The test suite sets it so tests never touch the real log.
+- `SHUNT_CONFIG_PATH` - config-file path override, honoured by both hooks. The test suite
+  sets it so tests never read or edit the installed `config.json`.
 - `SHUNT_WORKER`, `SHUNT_TIMEOUT` - override the worker model and its timeout for one call.
 
 ## Log format

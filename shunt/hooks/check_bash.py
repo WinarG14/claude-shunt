@@ -20,7 +20,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-CONFIG = os.path.join(ROOT, "config.json")
+DEFAULT_CONFIG = os.path.join(ROOT, "config.json")
 ERRLOG = os.path.join(ROOT, "log", "hook_errors.log")
 
 if HERE not in sys.path:
@@ -58,9 +58,18 @@ def log_event(cfg, obj):
         log_error("check_bash.py log_event: %r" % (exc,))
 
 
+def config_path():
+    """Config file path. SHUNT_CONFIG_PATH overrides it, so the tests never read or
+    write the installed config.json."""
+    override = (os.environ.get("SHUNT_CONFIG_PATH") or "").strip()
+    if override:
+        return os.path.expanduser(override)
+    return DEFAULT_CONFIG
+
+
 def load_config():
     try:
-        with open(CONFIG) as fh:
+        with open(config_path()) as fh:
             cfg = json.load(fh)
         if not isinstance(cfg, dict):
             raise ValueError("config root is not an object")

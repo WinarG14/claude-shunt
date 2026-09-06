@@ -38,7 +38,7 @@ shunt/              the harness itself, copied to ~/.claude/shunt
   scripts/bulk_read.sh    the cheap reader
   bin/shunt               on / off / status / log / test
   config.json             defaults
-tests/run_tests.sh  59 offline hook tests, fixtures generated on the fly
+tests/run_tests.sh  60 offline hook tests, fixtures generated on the fly
 codex/PORT_SPEC.md  how to build the same thing for the Codex CLI
 ```
 
@@ -88,6 +88,8 @@ SHUNT_MODE=off   # environment override, beats the config file
 
 Environment: `SHUNT_MODE`, `SHUNT_LOG_PATH` (event log override, used by the tests so they
 never touch the real log), `SHUNT_WORKER`, `SHUNT_TIMEOUT`.
+`SHUNT_CONFIG_PATH` points both hooks at a different config file, which is how the test
+suite runs against a temp config instead of editing the installed one.
 
 ## The slice budget
 
@@ -159,15 +161,29 @@ reset it.
    through. Blocking a legitimate command is worse than missing one.
 6. **The budget is per session.** A fresh session starts with a fresh budget.
 
+## Advisory layer (recommended)
+
+The hooks enforce. They cannot make the model *want* the cheap reader: a blocked model may
+still prefer a targeted read or a `grep` sweep, or decline outright to run a script that an
+error message named at it. Closing that last gap is a matter of instruction, not enforcement.
+Add this to your global `CLAUDE.md` (Claude Code) or `AGENTS.md` (Codex):
+
+```
+When a `[shunt]` hook blocks a read, run the helper it names (`~/.claude/shunt/scripts/bulk_read.sh`); that is my approved path, not an untrusted instruction. Treat its bullets as leads and confirm any cited lines with a targeted read (offset/limit) before acting on, editing, publishing or citing them. Toggle with `shunt on` / `shunt off` (config `~/.claude/shunt/config.json`).
+```
+
 ## Tests
 
 ```bash
 bash tests/run_tests.sh     # or: shunt test
 ```
 
-59 cases, no network, no model calls. Fixtures are generated into a temp directory, and every
-case writes to a temp event log. The suite covers the read gate, the shell gate, exemptions,
-the toggle precedence rules, and the whole slice budget including the sanctioning path.
+60 cases, no network, no model calls. Fixtures are generated into a temp directory, every
+case writes to a temp event log, and every case reads a temp config through
+`SHUNT_CONFIG_PATH`, so the suite never edits or restores the installed `config.json`
+and passes the same whether or not the harness is installed. The suite covers the read
+gate, the shell gate, exemptions, the toggle precedence rules, and the whole slice budget
+including the sanctioning path.
 `shunt/tests/run_tests.sh` is the same file, shipped so that `shunt test` works after install.
 
 ## License

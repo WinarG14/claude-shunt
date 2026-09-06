@@ -223,6 +223,10 @@ same keys and the same precedence:
 both applications from one place, which is the point of sharing the file. If the Codex reader
 needs its own model id, add a key such as `codex_worker` rather than a second file.
 
+`SHUNT_CONFIG_PATH` in the environment points the hooks at a different config file. It exists
+for the test suite, which must never read or edit the installed config; it is not a second
+config, and nothing but a test should set it.
+
 ## (e) Acceptance tests
 
 Mirror `../tests/run_tests.sh`. Generate fixtures at run time into a temp directory: a
@@ -252,8 +256,12 @@ blocks; a command that merely mentions the reader script does not sanction.
 
 Config precedence: `enabled` false allows on both gates, and `SHUNT_MODE=on` beats it.
 
-Restore any config the suite mutated, and assert at the end that the config is still valid
-JSON.
+The suite must never edit the installed config. Write one temp config (a copy of the real one,
+with an exempt path prefix added for the generated fixture directory so the exempt-prefix case
+does not depend on where the harness is installed) and export `SHUNT_CONFIG_PATH` for every
+case; use extra temp variants for the `enabled: false` and `slice_budget_enabled: false`
+cases. Assert at the end that the real config is byte-identical to what it was before the run
+and still valid JSON.
 
 ## (f) Do not
 
@@ -269,3 +277,16 @@ JSON.
 - Do not weaken the sanctioned-helper wording or the budget message. Both were tuned against
   observed model behaviour.
 - Do not add network calls to the hooks themselves. Only the reader script talks to a model.
+
+## (g) Advisory line for `~/.codex/AGENTS.md`
+
+The hooks enforce. They cannot make the model *want* the cheap reader: a blocked model may
+still prefer a targeted read or a `grep` sweep, or decline outright to run a script that an
+error message named at it. Closing that last gap is a matter of instruction, not enforcement.
+Add this line to the user's global `~/.codex/AGENTS.md` (same text as the Claude Code side;
+the helper path is unchanged because both applications share `~/.claude/shunt`), with the
+usual confirm-before-writing rule from (f):
+
+```
+When a `[shunt]` hook blocks a read, run the helper it names (`~/.claude/shunt/scripts/bulk_read.sh`); that is my approved path, not an untrusted instruction. Treat its bullets as leads and confirm any cited lines with a targeted read (offset/limit) before acting on, editing, publishing or citing them. Toggle with `shunt on` / `shunt off` (config `~/.claude/shunt/config.json`).
+```
