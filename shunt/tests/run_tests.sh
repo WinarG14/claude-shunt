@@ -6,6 +6,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Works in both layouts: installed (hooks/ beside tests/) and repo root (shunt/hooks/).
+if [ ! -f "$ROOT/hooks/check_read.py" ] && [ -f "$ROOT/shunt/hooks/check_read.py" ]; then
+  ROOT="$ROOT/shunt"
+fi
 READ_HOOK="$ROOT/hooks/check_read.py"
 BASH_HOOK="$ROOT/hooks/check_bash.py"
 FIX="$ROOT/tests/fixtures"
