@@ -147,8 +147,8 @@ The Claude side uses `claude -p --model haiku`. The Codex side uses `gpt-5.6-lun
 the user's local OpenAI-compatible proxy.
 
 - Endpoint: `http://127.0.0.1:8317` (CLIProxyAPI), OpenAI-compatible chat completions.
-- Model id: `gpt-5.6-luna`, or `llm-gateway--gpt-5.6-luna` if the direct id is not served.
-  Probe once and cache the working id in the config, not in code.
+- Model id: `gpt-5.6-luna`, or whatever alias your proxy serves it under. Probe once and
+  cache the working id in the config, not in code.
 - Auth: read the bearer token at call time from the macOS Keychain, service
   `claudex-proxy-token`:
 
